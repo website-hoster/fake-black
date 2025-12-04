@@ -1,0 +1,640 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Blackout Planner - Admin & Member Access</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script type="module">
+        // Firebase Imports
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, collection, onSnapshot, getDocs, updateDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        
+        // Log level for debugging Firestore issues
+        setLogLevel('debug');
+
+        // Global Firebase and App variables
+        let app, db, auth, userId;
+        let isAuthReady = false;
+
+        // Constants from the environment
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        
+        // --- App State & Configuration ---
+        const MASTER_PASSWORD = 'P1cklesC@t'; 
+        const MEMBER_PASSWORD = 'Member123';
+        const PUBLIC_MEMBERS_COLLECTION = `artifacts/${appId}/public/data/members`;
+
+        let currentView = 'login'; 
+        let userRole = null; // New state to track if the logged-in user is 'master' or 'member'
+        let restrictionStatus = 'restricted'; 
+        let membersData = []; 
+
+        // Set up the dark mode configuration
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        'primary-bg': '#000000', 
+                        'secondary-bg': '#1f2937',
+                        'text-light': '#f9fafb', 
+                        'blackout-green': '#34D399', 
+                        'blackout-red': '#F87171', 
+                    },
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                    }
+                }
+            }
+        }
+
+        // --- Firebase Initialization and Authentication ---
+        async function initFirebase() {
+            try {
+                if (Object.keys(firebaseConfig).length > 0) {
+                    app = initializeApp(firebaseConfig);
+                    db = getFirestore(app);
+                    auth = getAuth(app);
+
+                    // Sign in using the provided token or anonymously
+                    if (initialAuthToken) {
+                        await signInWithCustomToken(auth, initialAuthToken);
+                    } else {
+                        await signInAnonymously(auth);
+                    }
+
+                    onAuthStateChanged(auth, (user) => {
+                        userId = user ? user.uid : 'anon';
+                        isAuthReady = true;
+                        console.log("Authentication ready. User ID:", userId);
+                        
+                        // Setup data and listeners once authenticated
+                        if (isAuthReady) {
+                            setupInitialDashboardData();
+                            setupDashboardListener();
+                        }
+                    });
+                }
+            } catch (error) {
+                console.error("Firebase initialization failed:", error);
+            }
+        }
+
+        // --- Dashboard (Admin) Data Management ---
+
+        const MOCK_MEMBERS = [
+            { id: 'user_dev_01', name: 'Alex Johnson', isRestricted: true, role: 'Developer' },
+            { id: 'user_mkt_02', name: 'Maria Garcia', isRestricted: false, role: 'Marketing' },
+            { id: 'user_fin_03', name: 'Sam Chen', isRestricted: true, role: 'Finance' },
+            { id: 'user_ops_04', name: 'Jamie Baker', isRestricted: false, role: 'Operations' },
+        ];
+
+        async function setupInitialDashboardData() {
+            try {
+                const membersRef = collection(db, PUBLIC_MEMBERS_COLLECTION);
+                const querySnapshot = await getDocs(membersRef);
+                
+                if (querySnapshot.empty) {
+                    console.log("Initializing mock member data...");
+                    for (const member of MOCK_MEMBERS) {
+                        const memberDocRef = doc(db, PUBLIC_MEMBERS_COLLECTION, member.id);
+                        await setDoc(memberDocRef, member);
+                    }
+                }
+            } catch (e) {
+                console.error("Error setting up initial data:", e);
+            }
+        }
+
+        function setupDashboardListener() {
+            if (!isAuthReady || !db) return;
+
+            const membersRef = collection(db, PUBLIC_MEMBERS_COLLECTION);
+            onSnapshot(membersRef, (snapshot) => {
+                membersData = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+                if (currentView === 'dashboard') {
+                    renderDashboardView();
+                }
+            }, (error) => {
+                console.error("Error listening to members data:", error);
+            });
+        }
+        
+        window.toggleUserRestriction = async function(memberId, currentStatus) {
+            if (!db) return;
+            try {
+                const memberDocRef = doc(db, PUBLIC_MEMBERS_COLLECTION, memberId);
+                await updateDoc(memberDocRef, {
+                    isRestricted: !currentStatus
+                });
+                showTemporaryMessage(`Restriction toggled for ${memberId}.`, 'bg-gray-700', 'text-white');
+            } catch (e) {
+                console.error("Error toggling restriction:", e);
+                showTemporaryMessage('Failed to toggle restriction.', 'bg-blackout-red', 'text-white');
+            }
+        }
+
+        window.addMember = async function() {
+            const name = document.getElementById('add-name').value.trim();
+            const role = document.getElementById('add-role').value.trim();
+            
+            if (!name || !role) {
+                showTemporaryMessage('Name and Role are required.', 'bg-blackout-red', 'text-white');
+                return;
+            }
+
+            try {
+                const newId = 'user_' + name.toLowerCase().replace(/\s/g, '_') + '_' + Math.floor(Math.random() * 100);
+                const memberDocRef = doc(db, PUBLIC_MEMBERS_COLLECTION, newId);
+                await setDoc(memberDocRef, {
+                    id: newId,
+                    name: name,
+                    role: role,
+                    isRestricted: true // New users start restricted
+                });
+                
+                document.getElementById('add-name').value = '';
+                document.getElementById('add-role').value = '';
+                toggleAddMemberModal(false);
+                showTemporaryMessage(`${name} added successfully!`, 'bg-blackout-green', 'text-black');
+            } catch (e) {
+                console.error("Error adding member:", e);
+                showTemporaryMessage('Failed to add member.', 'bg-blackout-red', 'text-white');
+            }
+        }
+
+        window.toggleAddMemberModal = function(show) {
+            document.getElementById('add-member-modal').classList.toggle('hidden', !show);
+        }
+
+        // --- View Rendering Logic ---
+
+        function renderView() {
+            const loginView = document.getElementById('login-view');
+            const statusView = document.getElementById('status-view');
+            const dashboardView = document.getElementById('dashboard-view');
+            const footer = document.getElementById('app-footer');
+            
+            loginView.classList.add('hidden');
+            statusView.classList.add('hidden');
+            dashboardView.classList.add('hidden');
+            footer.classList.add('hidden'); 
+            document.getElementById('logout-icon').classList.add('hidden'); // Hide logout icon by default
+
+            if (currentView === 'login') {
+                loginView.classList.remove('hidden');
+                document.getElementById('login-message').textContent = ''; 
+                document.getElementById('password-input').value = ''; 
+            } else if (currentView === 'status') {
+                statusView.classList.remove('hidden');
+                footer.classList.remove('hidden'); 
+                document.getElementById('logout-icon').classList.remove('hidden');
+                updateStatusUI(); 
+            } else if (currentView === 'dashboard') {
+                dashboardView.classList.remove('hidden');
+                footer.classList.remove('hidden'); 
+                document.getElementById('logout-icon').classList.remove('hidden');
+                renderDashboardView(); 
+            }
+            // Update the display of the user role in the header
+            document.getElementById('user-role-display').textContent = userRole ? userRole.toUpperCase() : 'Guest';
+        }
+
+        // --- Status (Member) View Functions ---
+        
+        function updateStatusUI() {
+            const statusTextEl = document.getElementById('status-text');
+            const statusIconEl = document.getElementById('status-icon');
+            const statusRingEl = document.getElementById('status-ring');
+            const checkButtonEl = document.getElementById('check-button');
+
+            const restrictedSVG = `
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-7 h-7 text-black">
+                    <path fill-rule="evenodd" d="M12 2.25c-5.385 0-9.75 4.365-9.75 9.75s4.365 9.75 9.75 9.75 9.75-4.365 9.75-9.75S17.385 2.25 12 2.25zM6.69 12a.75.75 0 000 1.5h10.62a.75.75 0 000-1.5H6.69z" clip-rule="evenodd" />
+                </svg>
+            `;
+            const unrestrictedSVG = `
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-7 h-7 text-black">
+                    <path fill-rule="evenodd" d="M2.25 12c0-5.385 4.365-9.75 9.75-9.75s9.75 4.365 9.75 9.75-4.365 9.75-9.75 9.75S2.25 17.385 2.25 12zm13.36-1.814a.75.75 0 10-1.22-.872l-3.236 4.536-1.63-1.63a.75.75 0 00-1.06 1.06l2.25 2.25a.75.75 0 001.06 0l3.75-5.25z" clip-rule="evenodd" />
+                </svg>
+            `;
+
+            if (restrictionStatus === 'restricted') {
+                statusTextEl.textContent = 'You are in a restricted zone';
+                statusTextEl.className = 'text-lg font-medium text-gray-300';
+                statusIconEl.innerHTML = restrictedSVG;
+                statusIconEl.classList.remove('bg-blackout-green');
+                statusIconEl.classList.add('bg-gray-800'); 
+                statusRingEl.classList.add('pulse-restricted');
+                checkButtonEl.textContent = 'Check restriction status';
+                checkButtonEl.classList.add('bg-gray-700', 'text-gray-200', 'hover:bg-gray-600', 'shadow-red-900/50');
+                checkButtonEl.classList.remove('bg-blackout-green', 'text-black', 'shadow-green-900/50');
+            } else {
+                statusTextEl.textContent = 'You are in an unblocked zone!';
+                statusTextEl.className = 'text-lg font-medium text-blackout-green';
+                statusIconEl.innerHTML = unrestrictedSVG;
+                statusIconEl.classList.remove('bg-gray-800');
+                statusIconEl.classList.add('bg-blackout-green'); 
+                statusRingEl.classList.remove('pulse-restricted');
+                checkButtonEl.textContent = 'Restriction is OFF';
+                checkButtonEl.classList.remove('bg-gray-700', 'text-gray-200', 'shadow-red-900/50', 'hover:bg-gray-600');
+                checkButtonEl.classList.add('bg-blackout-green', 'text-black', 'hover:bg-green-300', 'shadow-green-900/50');
+            }
+        }
+        
+        window.checkRestrictionStatus = function() {
+            restrictionStatus = restrictionStatus === 'restricted' ? 'unrestricted' : 'restricted';
+            updateStatusUI();
+        }
+
+        // --- Dashboard (Admin) View Functions ---
+
+        function renderDashboardView() {
+            const listContainer = document.getElementById('member-list-container');
+            if (!listContainer) return;
+
+            const sortedMembers = membersData.sort((a, b) => {
+                if (a.isRestricted === b.isRestricted) {
+                    return a.name.localeCompare(b.name);
+                }
+                return a.isRestricted ? -1 : 1;
+            });
+            
+            listContainer.innerHTML = sortedMembers.map(member => {
+                const statusColor = member.isRestricted ? 'text-blackout-red' : 'text-blackout-green';
+                const statusText = member.isRestricted ? 'Restricted' : 'Unblocked';
+                const buttonBg = member.isRestricted ? 'bg-blackout-green hover:bg-green-300' : 'bg-gray-600 hover:bg-gray-500';
+                const buttonText = member.isRestricted ? 'UNBLOCK' : 'RESTRICT';
+
+                return `
+                    <div class="flex items-center justify-between p-4 mb-3 bg-gray-900 rounded-xl border border-gray-800 shadow-lg transition duration-200">
+                        <div class="flex flex-col">
+                            <span class="text-text-light font-medium">${member.name}</span>
+                            <span class="text-xs text-gray-500">${member.role}</span>
+                        </div>
+                        <div class="flex items-center space-x-4">
+                            <span class="${statusColor} text-sm font-semibold min-w-[70px] text-right">${statusText}</span>
+                            <button onclick="toggleUserRestriction('${member.id}', ${member.isRestricted})" 
+                                class="px-3 py-1 text-xs font-bold text-black rounded-full ${buttonBg} transition-colors">
+                                ${buttonText}
+                            </button>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+
+        // --- Login / Logout Handling ---
+
+        window.handleLogin = function() {
+            const passwordInput = document.getElementById('password-input').value;
+            
+            if (passwordInput === MASTER_PASSWORD) {
+                currentView = 'dashboard';
+                userRole = 'master';
+                renderView();
+                showTemporaryMessage('Admin Dashboard Login Successful!', 'bg-blackout-green', 'text-black');
+            } else if (passwordInput === MEMBER_PASSWORD) {
+                currentView = 'status';
+                userRole = 'member';
+                renderView();
+                showTemporaryMessage('Member Login Successful!', 'bg-blackout-green', 'text-black');
+            } else {
+                showTemporaryMessage('Error: Invalid Password.', 'bg-blackout-red', 'text-white');
+            }
+        }
+
+        window.handleLogout = async function() {
+            try {
+                if (auth) {
+                    // Firebase sign out for clean session management
+                    await signOut(auth); 
+                }
+                currentView = 'login';
+                userRole = null;
+                renderView();
+                showTemporaryMessage('Logged out successfully.', 'bg-gray-700', 'text-white');
+            } catch (e) {
+                console.error("Logout failed:", e);
+                currentView = 'login';
+                userRole = null;
+                renderView();
+                showTemporaryMessage('Logout complete.', 'bg-gray-700', 'text-white');
+            }
+        }
+
+
+        // Custom function to show a temporary message box instead of alert()
+        function showTemporaryMessage(message, bgColorClass, textColorClass) {
+            const msgBox = document.getElementById('message-box');
+            msgBox.textContent = message;
+            msgBox.classList.remove('hidden', 'bg-blackout-red', 'bg-blackout-green', 'text-white', 'text-black', 'opacity-0');
+            msgBox.classList.add(bgColorClass, textColorClass, 'opacity-100');
+            
+            setTimeout(() => {
+                msgBox.classList.remove('opacity-100');
+                msgBox.classList.add('opacity-0');
+                setTimeout(() => {
+                    msgBox.classList.add('hidden');
+                }, 500); // Wait for transition to finish
+            }, 2500);
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            initFirebase();
+            setTimeout(renderView, 500); 
+        });
+
+    </script>
+    <style>
+        /* Define the keyframes for the pulsating glow */
+        @keyframes pulse-restricted {
+            0% {
+                box-shadow: 0 0 0 0 rgba(248, 113, 113, 0.7); /* Red glow */
+            }
+            70% {
+                box-shadow: 0 0 0 25px rgba(248, 113, 113, 0);
+            }
+            100% {
+                box-shadow: 0 0 0 0 rgba(248, 113, 113, 0);
+            }
+        }
+
+        /* General styling for the true black mobile app theme */
+        body {
+            background-color: #000000;
+            color: #f9fafb;
+            font-family: 'Inter', sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            overflow: hidden; 
+        }
+
+        .mobile-frame {
+            /* Mobile First Defaults: Full screen */
+            width: 100%;
+            height: 100vh;
+            min-height: 100vh;
+            background: #000000; 
+            display: flex;
+            flex-direction: column;
+            position: relative;
+            overflow: hidden;
+        }
+        
+        /* Simulates the subtle background pattern from the image - using a geometric style */
+        .background-pattern {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: 
+                linear-gradient(rgba(10, 10, 10, 0.5) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(10, 10, 10, 0.5) 1px, transparent 1px);
+            background-size: 25px 25px;
+            opacity: 0.3;
+            mask-image: radial-gradient(circle at center, black 0%, transparent 85%);
+            -webkit-mask-image: radial-gradient(circle at center, black 0%, transparent 85%);
+            z-index: 0;
+        }
+
+        .content-area {
+            position: relative;
+            z-index: 10;
+            flex-grow: 1;
+            padding: 1.5rem 1.5rem 0; 
+            display: flex;
+            flex-direction: column;
+        }
+
+        .pulse-restricted {
+            animation: pulse-restricted 1.5s infinite;
+        }
+
+        /* Styling for the bottom navigation */
+        .nav-icon {
+            @apply p-3 rounded-xl text-gray-500 hover:text-white transition;
+        }
+        .nav-icon.active {
+             @apply text-white bg-gray-800 shadow-xl;
+        }
+        
+        /* Ensures the icon container is large enough for the pulse effect */
+        #status-icon-container {
+            width: 90px;
+            height: 90px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        #status-icon {
+            width: 80px;
+            height: 80px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 0; 
+            border-radius: 9999px; 
+        }
+        #status-icon svg {
+            width: 32px;
+            height: 32px;
+        }
+        
+        /* MEDIA QUERY: Add the phone frame simulation only for desktop viewing */
+        @media (min-width: 641px) {
+            body {
+                background-color: #111111;
+            }
+            .mobile-frame {
+                max-width: 400px;
+                height: 90vh;
+                min-height: 700px;
+                border-radius: 40px;
+                box-shadow: 0 0 50px rgba(0, 0, 0, 0.7), 0 0 20px rgba(0, 0, 0, 0.4);
+                border: 8px solid #000;
+                margin: 5vh auto; 
+                background: #111111;
+            }
+            .content-area {
+                padding: 2.5rem 2rem; 
+            }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Custom Message Box for notifications (instead of alert) -->
+    <div id="message-box" class="fixed top-4 left-1/2 -translate-x-1/2 px-4 py-2 rounded-xl text-center shadow-2xl z-50 transition-opacity duration-500 hidden opacity-0">
+        Message goes here.
+    </div>
+    
+    <!-- Add Member Modal -->
+    <div id="add-member-modal" class="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4 hidden" onclick="toggleAddMemberModal(false)">
+        <div class="bg-gray-900 p-6 rounded-2xl w-full max-w-sm shadow-2xl" onclick="event.stopPropagation()">
+            <h3 class="text-xl font-bold mb-4 text-text-light">Add New Member</h3>
+            <p class="text-sm text-gray-400 mb-6">New members are automatically restricted upon creation.</p>
+            
+            <input id="add-name" type="text" placeholder="Member Name (e.g., John Doe)" 
+                   class="w-full p-3 mb-3 text-base rounded-xl bg-gray-800 text-text-light border border-gray-700 focus:border-blackout-green focus:outline-none" />
+            
+            <input id="add-role" type="text" placeholder="Role (e.g., Tester, Designer)" 
+                   class="w-full p-3 mb-6 text-base rounded-xl bg-gray-800 text-text-light border border-gray-700 focus:border-blackout-green focus:outline-none" />
+            
+            <div class="flex justify-end space-x-3">
+                <button onclick="toggleAddMemberModal(false)" 
+                    class="px-4 py-2 text-sm font-semibold rounded-xl text-gray-400 hover:text-white transition">
+                    Cancel
+                </button>
+                <button onclick="addMember()" 
+                    class="px-4 py-2 text-sm font-semibold rounded-xl bg-blackout-green text-black hover:bg-green-300 transition">
+                    Add Member
+                </button>
+            </div>
+        </div>
+    </div>
+
+
+    <div class="mobile-frame">
+        <div class="background-pattern"></div>
+        
+        <div class="content-area">
+            
+            <!-- Header/Logo Area & Logout Button -->
+            <div class="flex items-center justify-between mb-10">
+                <div class="flex items-center">
+                    <img src="https://placehold.co/28x28/F3F4F6/000000?text=b" 
+                         alt="Blackout App Logo" 
+                         class="mr-2 shrink-0 rounded-full w-7 h-7"
+                         title="Replace this placeholder URL with './logo.png' when deploying.">
+                    
+                    <span class="text-xl font-bold text-text-light">Blackout</span>
+                    <span id="user-role-display" class="text-xs ml-3 px-2 py-1 bg-gray-800 rounded-lg text-gray-500">Guest</span>
+                </div>
+                
+                <!-- Logout Icon (Visible after login) -->
+                <button id="logout-icon" onclick="handleLogout()" class="nav-icon text-gray-500 hover:text-blackout-red hidden">
+                    <!-- Logout SVG Icon -->
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" class="w-6 h-6">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0 0 13.5 3h-6a2.25 2.25 0 0 0-2.25 2.25v13.5A2.25 2.25 0 0 0 7.5 21h6a2.25 2.25 0 0 0 2.25-2.25V15M12 9l3 3m0 0-3 3m3-3H9" />
+                    </svg>
+                </button>
+            </div>
+
+            <!-- --- LOGIN VIEW (Initial Screen) --- -->
+            <div id="login-view" class="flex-grow flex flex-col items-center justify-center text-center px-4 py-8">
+                
+                <h2 class="text-xl font-light text-text-light mb-16">Please enter your password</h2>
+                
+                <input id="password-input" type="password" placeholder="Enter password" 
+                       class="w-full max-w-xs p-4 mb-4 text-base rounded-xl bg-gray-800 text-text-light border border-gray-700 focus:border-blackout-green focus:ring-1 focus:ring-blackout-green focus:outline-none transition" />
+                
+                <p id="login-message" class="text-sm text-gray-400 h-6 mb-8"></p>
+                
+                <button onclick="handleLogin()" 
+                    class="w-full max-w-xs px-6 py-4 text-base font-semibold rounded-2xl transition transform hover:scale-[1.02] active:scale-[0.98] shadow-xl bg-gray-700 text-gray-200 hover:bg-gray-600">
+                    ENTER
+                </button>
+                
+                <div class="mt-8 text-sm text-gray-500 space-y-1">
+                    <p>Hint: Master Admin access: <span class="text-blackout-green">P1cklesC@t</span></p>
+                    <p>Hint: Regular Member access: <span class="text-blackout-green">Member123</span></p>
+                </div>
+            </div>
+
+
+            <!-- --- DASHBOARD VIEW (Master Access) --- -->
+            <div id="dashboard-view" class="flex-grow flex flex-col pt-4 hidden">
+                <div class="flex justify-between items-center mb-6">
+                    <h2 class="text-2xl font-bold text-text-light">Admin Dashboard</h2>
+                    <button onclick="toggleAddMemberModal(true)" class="px-3 py-2 text-sm font-semibold rounded-xl bg-gray-700 text-gray-200 hover:bg-gray-600 transition">
+                         + Add Member
+                    </button>
+                </div>
+                <p class="text-sm text-gray-400 mb-6">Manage user restriction status in real-time. This list updates automatically.</p>
+                
+                <div class="flex flex-col flex-grow overflow-y-auto pb-4" id="member-list-container">
+                    <!-- Member list will be rendered here by JavaScript (onSnapshot) -->
+                    <p class="text-center text-gray-500 pt-10">Loading member data...</p>
+                </div>
+                
+                <div class="mt-auto pt-4 text-sm text-gray-500 text-center border-t border-gray-900/50">
+                    Admin User ID: <span class="text-xs text-blackout-green break-all">${typeof userId !== 'undefined' ? userId : 'N/A'}</span>
+                </div>
+            </div>
+
+
+            <!-- --- STATUS VIEW (Member Access) --- -->
+            <div id="status-view" class="flex-grow flex flex-col items-center text-center -mt-8 hidden">
+                
+                <!-- Descriptive Text -->
+                <div class="text-sm text-gray-400 leading-relaxed mb-12 space-y-3 px-4">
+                    <p>This app restricts access to apps not required inside your controlled environment. Your device will be automatically unblocked and blocked at the appropriate time.</p>
+                    <p>Blackout cannot track your usage of any other app, and complies with your local data protection legislation.</p>
+                </div>
+                
+                <!-- Central Status Area -->
+                <div class="flex-grow flex flex-col items-center justify-center text-center -mt-8">
+                    
+                    <!-- Status Icon Container with Glow Effect -->
+                    <div id="status-icon-container" class="relative mb-12">
+                        <!-- Glow/Ring Element (Pulsating Red for Restricted) -->
+                        <div id="status-ring" class="absolute inset-0 rounded-full bg-transparent transition-all duration-500 ease-in-out"></div>
+                        
+                        <!-- Inner Icon (The actual icon and background) -->
+                        <div id="status-icon" class="relative shadow-2xl transition-all duration-500">
+                            <!-- SVG content updated by JS -->
+                        </div>
+                    </div>
+                    
+                    <!-- Status Text -->
+                    <p id="status-text" class="text-lg font-medium mb-16">
+                        <!-- Text updated by JS -->
+                    </p>
+
+                    <!-- Check Status Button -->
+                    <button id="check-button" onclick="checkRestrictionStatus()" 
+                        class="w-full max-w-xs px-6 py-4 text-base font-semibold rounded-2xl transition transform hover:scale-[1.02] active:scale-[0.98] shadow-xl">
+                        Check restriction status
+                    </button>
+                </div>
+            </div>
+
+            <!-- Footer Navigation Bar (Hidden on Login View) -->
+            <footer id="app-footer" class="mt-auto flex justify-around p-4 bg-black/50 border-t border-gray-900/50 backdrop-blur-sm hidden">
+                <a href="#" class="nav-icon active">
+                    <!-- Home Icon -->
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" class="w-6 h-6">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12l8.954-8.955c.44-.439 1.15-.439 1.59 0L21.75 12M4.5 9.75v10.125c0 .621.504 1.125 1.125 1.125H9.75v-4.875c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v4.875h4.125c.621 0 1.125-.504 1.125-1.125V9.75M8.25 21.75h7.5" />
+                    </svg>
+                </a>
+                <a href="#" class="nav-icon">
+                    <!-- Settings Icon -->
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M10.325 4.317c.426-1.75 2.924-1.75 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.75.426 1.75 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.75-2.924 1.75-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.75-.426-1.75-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                    </svg>
+                </a>
+                <a href="#" class="nav-icon">
+                    <!-- Wi-Fi/Signal Icon -->
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M8.288 15.038a5.25 5.25 0 017.424 0M5.193 12.207a10.5 10.5 0 0113.614 0M1.01 9.38L2.0 8.35a16.5 16.5 0 0120 0l.99.99M12 21.75V15" />
+                    </svg>
+                </a>
+            </footer>
+
+        </div>
+        
+    </div>
+
+</body>
+</html>
